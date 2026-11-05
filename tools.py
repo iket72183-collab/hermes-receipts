@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .checks import check_file, check_website
+from .checks import check_file, check_website, workspace_refusal
 from .export import render_html, render_json, write_export
 from .observe import judge_test_observation
 from .schema import (
@@ -64,6 +64,9 @@ def receipts_begin(
     except (SpecError, TypeError, ValueError, RecursionError) as exc:
         return _error(str(exc))
     root = Path(spec["workspace_root"])
+    refusal = workspace_refusal(str(root))
+    if refusal:
+        return _error(refusal)
     if not root.is_dir():
         return _error("workspace_root is not an existing directory")
     host_task, host_session = host_context(task_id, session_id)

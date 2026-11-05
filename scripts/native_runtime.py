@@ -21,7 +21,9 @@ class NativeRuntime:
         self.output = output.resolve()
         self.output.mkdir(parents=True, exist_ok=True)
         self.home = self.output / ("home_" + uuid.uuid4().hex[:10])
-        self.workspace = self.home / "workspace"
+        self.home.mkdir()
+        # Real workspaces must be outside the profile's private state tree.
+        self.workspace = self.output / (self.home.name + "-workspace")
         self.workspace.mkdir(parents=True)
         os.environ['HERMES_HOME'] = str(self.home)
         os.environ.pop('HERMES_PROFILE', None)

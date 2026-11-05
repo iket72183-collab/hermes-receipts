@@ -1,6 +1,8 @@
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +24,17 @@ class ReceiptTests(unittest.TestCase):
         base.mkdir(parents=True, exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=base)
         self.root = Path(self.temp.name)
+        # Standalone unit fixtures only; native smoke uses real Hermes safety.
+        self.home = self.root / "hermes-home"
+        constants = types.ModuleType("hermes_constants")
+        constants.get_hermes_home = lambda: self.home
+        self.safety = types.ModuleType("agent.file_safety")
+        self.safety.get_read_block_error = lambda path: None
+        modules = {"hermes_constants": constants, "agent": types.ModuleType("agent"),
+                   "agent.file_safety": self.safety}
+        self.module_patch = patch.dict(sys.modules, modules)
+        self.module_patch.start()
+        self.addCleanup(self.module_patch.stop)
         self.db = self.root / "state" / "data.db"
         tools.set_db_override(self.db)
         self.mock = patch.object(observe, "transaction", lambda: storage.transaction(self.db))
@@ -82,6 +95,62 @@ class ReceiptTests(unittest.TestCase):
         receipt = self.seal(self.begin())
         self.assertEqual(receipt['state'], 'verified')
         self.assertEqual(len(receipt['checks'][0]['evidence']['sha256']), 64)
+
+    def test_denied_file_is_unverified_before_any_open(self):
+        for expectation in ({"contains": "Ready"}, {"contains": "Wrong"}, {"json_keys": ["ok"]}):
+            with self.subTest(expectation=expectation), patch.object(
+                self.safety, "get_read_block_error", return_value="Access denied: synthetic credential"
+            ) as guard, patch.object(checks.os, "open", side_effect=AssertionError("denied file opened")):
+                result = checks.check_file({"path": "page.html", **expectation}, str(self.root))
+                self.assertEqual(result["state"], "unverified")
+                self.assertEqual(result["reason"], "Access denied: synthetic credential")
+                self.assertEqual(result["evidence"], {"relative_path": "page.html"})
+                guard.assert_called_once_with(str(self.root / "page.html"))
+
+    def test_missing_or_broken_read_guard_fails_closed(self):
+        for error in (ImportError, RuntimeError):
+            with self.subTest(error=error), patch.object(self.safety, "get_read_block_error", side_effect=error), patch.object(
+                checks.os, "open", side_effect=AssertionError("unguarded open")
+            ):
+                self.assertEqual(checks.check_file({"path": "page.html", "contains": "Ready"}, str(self.root))["state"], "unverified")
+        with patch.dict(sys.modules, {"agent.file_safety": None}), patch.object(checks.os, "open", side_effect=AssertionError("unguarded open")):
+            result = checks.check_file({"path": "page.html", "contains": "Ready"}, str(self.root))
+            self.assertEqual(result["state"], "unverified")
+            self.assertIn("unavailable", result["reason"])
+
+    def test_hermes_home_workspaces_rejected_at_begin_and_read(self):
+        self.home.mkdir()
+        (self.home / "child").mkdir()
+        alias = self.root / "home-alias"
+        alias.symlink_to(self.home, target_is_directory=True)
+        for root in (self.home, self.home / "child", alias, self.home / "child" / ".."):
+            with self.subTest(root=root), patch.object(checks.os, "open", side_effect=AssertionError("home opened")):
+                raw = self.spec(); raw["workspace_root"] = str(root)
+                result = json.loads(tools.receipts_begin({"spec": raw}, **self.identity))
+                self.assertFalse(result["ok"])
+                self.assertIn("Hermes home", result["error"])
+                result = checks.check_file({"path": ".env", "contains": "x"}, str(root))
+                self.assertEqual(result["state"], "unverified")
+
+    def test_missing_home_guard_fails_closed(self):
+        with patch.dict(sys.modules, {"hermes_constants": None}):
+            result = json.loads(tools.receipts_begin({"spec": self.spec()}, **self.identity))
+            self.assertFalse(result["ok"])
+            self.assertIn("unavailable", result["error"])
+            self.assertEqual(checks.check_file({"path": "page.html", "contains": "Ready"}, str(self.root))["state"], "unverified")
+
+    def test_home_policy_rechecked_when_sealing_old_attempt(self):
+        att = self.begin()
+        self.home = self.root
+        self.assertEqual(self.seal(att)["state"], "unverified")
+
+    def test_denylist_rechecked_when_sealing_and_preserves_history(self):
+        att = self.begin()
+        with patch.object(self.safety, "get_read_block_error", return_value="Access denied: policy changed"):
+            receipt = self.seal(att)
+        self.assertEqual(receipt["state"], "unverified")
+        self.assertEqual(self.seal(att), receipt)
+        self.assertEqual(self.seal(self.begin())["state"], "verified")
 
     def test_missing_file_failed(self):
         self.assertEqual(checks.check_file(self.spec(path="absent")["checks"][0], str(self.root))["state"], "failed")

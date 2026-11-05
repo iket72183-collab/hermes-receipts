@@ -60,14 +60,43 @@ class _FileRefused(ValueError):
         self.state = state
 
 
+def workspace_refusal(workspace_root: str) -> str | None:
+    """Bind the workspace restriction to the active profile on every call."""
+    try:
+        from hermes_constants import get_hermes_home
+
+        root = Path(workspace_root).resolve()
+        home = Path(get_hermes_home()).resolve()
+        if root == home or home in root.parents:
+            return "workspace_root must not be at or under the active Hermes home"
+    except Exception as exc:
+        return f"Hermes workspace safety unavailable: {type(exc).__name__}"
+    return None
+
+
 def _read_regular(workspace_root: str, rel: str) -> bytes:
     """Descriptor-relative traversal: no symlink race, FIFO wait, or unbounded read."""
     parts = rel.split("/")
     if not Path(workspace_root).is_absolute() or any(p in {"", ".", ".."} for p in parts) or "\\" in rel:
         raise _FileRefused("path traversal rejected")
+    try:
+        root = Path(workspace_root).resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _FileRefused(f"workspace resolution failed: {type(exc).__name__}", "unverified") from exc
+    refusal = workspace_refusal(str(root))
+    if refusal:
+        raise _FileRefused(refusal, "unverified")
+    try:
+        from agent.file_safety import get_read_block_error
+
+        refusal = get_read_block_error(str(root.joinpath(*parts)))
+    except Exception as exc:
+        raise _FileRefused(f"Hermes read safety unavailable: {type(exc).__name__}", "unverified") from exc
+    if refusal:
+        raise _FileRefused(refusal, "unverified")
     descriptors = []
     try:
-        directory = os.open(workspace_root, os.O_RDONLY | os.O_DIRECTORY)
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         descriptors.append(directory)
         for part in parts[:-1]:
             directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
