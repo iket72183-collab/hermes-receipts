@@ -11,6 +11,26 @@ checks=importlib.import_module(plugin.__name__+'.checks')
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path in ('/short', '/short-wrong', '/close', '/body-deadline', '/chunked', '/chunk-trailer', '/chunk-short', '/chunk-no-end', '/chunk-no-trailer', '/chunk-bad-delimiter', '/chunk-negative'):
+            self.send_response(200)
+            if self.path.startswith('/chunk'):
+                self.send_header('Transfer-Encoding', 'chunked')
+            elif self.path.startswith('/short'):
+                self.send_header('Content-Length', '500')
+            self.end_headers()
+            body = {
+                '/chunked': b'5\r\nReady\r\n0\r\n\r\n',
+                '/chunk-trailer': b'5;fixture=yes\r\nReady\r\n0\r\nX-Fixture: complete\r\n\r\n',
+                '/chunk-short': b'A\r\nReady',
+                '/chunk-no-end': b'5\r\nReady\r\n',
+                '/chunk-no-trailer': b'5\r\nReady\r\n0\r\n',
+                '/chunk-bad-delimiter': b'5\r\nReadyxx0\r\n\r\n',
+                '/chunk-negative': b'-1\r\nReady\r\n0\r\n\r\n',
+                '/short-wrong': b'Wrong',
+            }.get(self.path, b'Ready')
+            self.wfile.write(body); self.wfile.flush()
+            if self.path == '/body-deadline': time.sleep(.4)
+            return
         if self.path=='/drip-headers':
             try:
                 for fragment in [b'HTTP/1.0 200 OK\r\n', *([b'X-Slow: a\r\n']*15), b'\r\nReady']:
@@ -44,6 +64,25 @@ class WebsiteTests(unittest.TestCase):
     def test_200_wrong_content_fails(self):
         result=self.run_check('/wrong');self.assertEqual(result['state'],'failed');self.assertEqual(result['evidence']['status'],200)
     def test_correct_content_passes(self):self.assertEqual(self.run_check('/correct')['state'],'passed')
+    def test_short_declared_body_unverified_with_or_without_required_text(self):
+        for path in ('/short', '/short-wrong'):
+            with self.subTest(path=path):
+                self.assertEqual(self.run_check(path)['state'], 'unverified')
+    def test_complete_close_delimited_body_passes(self):
+        self.assertEqual(self.run_check('/close')['state'], 'passed')
+    def test_complete_chunked_body_passes(self):
+        for path in ('/chunked', '/chunk-trailer'):
+            with self.subTest(path=path):
+                self.assertEqual(self.run_check(path)['state'], 'passed')
+    def test_incomplete_chunked_body_unverified(self):
+        for path in ('/chunk-short', '/chunk-no-end', '/chunk-no-trailer', '/chunk-bad-delimiter', '/chunk-negative'):
+            with self.subTest(path=path):
+                self.assertEqual(self.run_check(path)['state'], 'unverified')
+    def test_deadline_eof_cannot_pass_matching_prefix(self):
+        with patch.object(checks, 'WEBSITE_DEADLINE_SECONDS', .1):
+            start = time.monotonic(); result = self.run_check('/body-deadline')
+        self.assertEqual(result['state'], 'unverified')
+        self.assertLess(time.monotonic() - start, .35)
     def test_wrong_status_fails(self):self.assertEqual(self.run_check('/correct',expected_status=201)['state'],'failed')
     def test_redirect_not_followed(self):self.assertEqual(self.run_check('/redirect')['evidence']['status'],302)
     def test_large_response_unverified(self):self.assertEqual(self.run_check('/large')['state'],'unverified')

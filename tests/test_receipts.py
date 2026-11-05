@@ -98,6 +98,31 @@ class ReceiptTests(unittest.TestCase):
         raw['json_keys'] = ['missing']
         self.assertEqual(checks.check_file(raw, str(self.root))["state"], "failed")
 
+    def test_json_parser_limits_seal_mixed_checks_and_allow_new_attempt(self):
+        raw = self.spec()
+        raw['checks'].append({'id':'json', 'kind':'file', 'path':'nested.json', 'json_keys':['ok']})
+        payloads = ('{"ok":' + '[' * 2000 + '0' + ']' * 2000 + '}',
+                    '{"ok":' + '1' * 5000 + '}')
+        for payload in payloads:
+            with self.subTest(payload_size=len(payload)):
+                (self.root / 'nested.json').write_text(payload)
+                attempt = self.begin(raw)
+                receipt = self.seal(attempt)
+                self.assertEqual(receipt['state'], 'unverified')
+                self.assertEqual([c['state'] for c in receipt['checks']], ['passed', 'unverified'])
+                self.assertIn('parser limit', receipt['checks'][1]['reason'])
+                self.assertEqual(self.seal(attempt), receipt)
+                history = json.loads(tools.receipts_get({'task_id':'demo', 'attempt_id':attempt}))
+                self.assertEqual(history['attempts'], [receipt])
+                (self.root / 'nested.json').write_text('{"ok":true}')
+                self.assertEqual(self.seal(self.begin(raw))['state'], 'verified')
+
+    def test_json_parser_resource_errors_are_unverified(self):
+        raw = {'path':'page.html', 'json_keys':['ok']}
+        for error in (MemoryError, OverflowError):
+            with self.subTest(error=error.__name__), patch.object(checks.json, 'loads', side_effect=error):
+                self.assertEqual(checks.check_file(raw, str(self.root))['state'], 'unverified')
+
     def test_traversal_and_absolute_paths_rejected(self):
         for value in ("../outside", "/etc/passwd", "a/../page.html", "a//x"):
             with self.assertRaises(schema.SpecError): schema.normalize_spec(self.spec(path=value))
@@ -230,6 +255,40 @@ class ReceiptTests(unittest.TestCase):
         for fmt in ('html','json'):
             result=json.loads(tools.receipts_export({'attempt_id':att,'format':fmt}))
             self.assertTrue(result['ok']);self.assertTrue((self.db.parent/'exports'/result['filename']).is_file())
+
+    def test_public_url_redaction_preserves_private_snapshot_and_digest(self):
+        urls = (
+            'https://demo:USERINFO_CANARY@example.com/',
+            'https://example.com/?opaque=QUERY_CANARY#FRAGMENT_CANARY',
+            'https://demo:USERINFO_CANARY@example.com/?opaque=QUERY_CANARY#FRAGMENT_CANARY',
+        )
+        for url in urls:
+            with self.subTest(url=url), patch.object(checks, 'fetch_url', side_effect=AssertionError('refused URL fetched')) as fetch:
+                att = self.begin(self.spec('website', url=url))
+                receipt = self.seal(att)
+                self.assertEqual(receipt['state'], 'unverified')
+                fetch.assert_not_called()
+                before = json.dumps(receipt, sort_keys=True)
+                for fmt in ('json', 'html'):
+                    result = json.loads(tools.receipts_export({'attempt_id':att, 'format':fmt}))
+                    self.assertTrue(result['ok'])
+                    rendered = (self.db.parent/'exports'/result['filename']).read_text()
+                    for canary in ('USERINFO_CANARY', 'QUERY_CANARY', 'FRAGMENT_CANARY'):
+                        self.assertNotIn(canary, rendered)
+                    if fmt == 'json':
+                        public = json.loads(rendered)
+                        self.assertEqual(public['spec']['checks'][0]['url'], 'https://example.com/')
+                        self.assertEqual(public['criteria_digest'], receipt['criteria_digest'])
+                self.assertEqual(receipt['spec']['checks'][0]['url'], url)
+                self.assertEqual(schema.criteria_digest(receipt['spec']), receipt['criteria_digest'])
+                self.assertEqual(json.dumps(self.seal(att), sort_keys=True), before)
+                self.assertEqual(json.dumps(receipt, sort_keys=True), before)
+
+    def test_public_view_sanitizes_evidence_urls_too(self):
+        receipt = self.seal(self.begin())
+        receipt['checks'][0]['evidence']['url'] = 'https://demo:URL_CANARY@example.com/?opaque=URL_CANARY#URL_CANARY'
+        self.assertNotIn('URL_CANARY', exports.render_json(receipt))
+        self.assertNotIn('URL_CANARY', exports.render_html(receipt))
 
     def test_export_refuses_symlink(self):
         receipt=self.seal(self.begin());directory=self.root/'exports';directory.mkdir()

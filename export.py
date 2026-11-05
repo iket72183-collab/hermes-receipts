@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .checks import sanitize_url
 from .schema import valid_id
 
 _SECRET_RE = re.compile(
@@ -30,6 +31,8 @@ def public_view(receipt: dict[str, Any]) -> dict[str, Any]:
         if "workspace_root" in spec:
             spec["workspace_root"] = "<redacted-path>"
         for check in spec.get("checks") or []:
+            if isinstance(check, dict) and isinstance(check.get("url"), str):
+                check["url"] = sanitize_url(check["url"])
             if isinstance(check, dict) and "workdir" in check:
                 check["workdir"] = "<redacted-path>"
             if isinstance(check, dict) and "command" in check:
@@ -39,6 +42,8 @@ def public_view(receipt: dict[str, Any]) -> dict[str, Any]:
             continue
         evidence = check.get("evidence")
         if isinstance(evidence, dict):
+            if isinstance(evidence.get("url"), str):
+                evidence["url"] = sanitize_url(evidence["url"])
             evidence.pop("output", None)
             evidence.pop("command", None)
             for key in ("workdir", "path", "full_output_path"):

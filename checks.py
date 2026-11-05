@@ -104,6 +104,15 @@ def _json_keys(data: bytes, keys: list[str], evidence: dict[str, Any]) -> dict[s
             "evidence": evidence,
             "provenance": "file-read",
         }
+    except (RecursionError, ValueError, OverflowError, MemoryError) as exc:
+        # Bounded bytes can still exceed parser depth/integer/resource limits.
+        # These are checker limitations, not evidence of malformed JSON.
+        return {
+            "state": "unverified",
+            "reason": f"JSON parser limit: {type(exc).__name__}",
+            "evidence": evidence,
+            "provenance": "file-read",
+        }
     if not isinstance(parsed, dict):
         return {
             "state": "failed",
@@ -293,7 +302,6 @@ def fetch_url(url: str, deadline: float, *, allow_loopback_http: bool) -> dict[s
     if _address_refusal(parsed_ip, scheme=parts.scheme, allow_loopback_http=allow_loopback_http):
         return {"error": "resolved address refused"}
     path = parts.path or "/"
-    started = time.monotonic()
     remaining = end_at - time.monotonic()
     if remaining <= 0:
         return {"error": "timeout"}
@@ -303,6 +311,7 @@ def fetch_url(url: str, deadline: float, *, allow_loopback_http: bool) -> dict[s
         conn = _PinnedHTTPSConnection(host, port, ip, timeout=remaining, context=context)
     else:
         conn = _PinnedHTTPConnection(host, port, ip, timeout=remaining)
+    conn.response_class = _FramedHTTPResponse
     conn._end_at = end_at
     def abort_at_deadline():
         sock = getattr(conn, "_deadline_socket", None)
@@ -331,20 +340,23 @@ def fetch_url(url: str, deadline: float, *, allow_loopback_http: bool) -> dict[s
         encoding = (response.getheader("Content-Encoding") or "").strip().lower()
         if encoding and encoding != "identity":
             return {"status": status, "error": "compressed response refused"}
-        declared = response.getheader("Content-Length")
-        if declared:
-            try:
-                if int(declared) > FILE_READ_CAP:
-                    return {"status": status, "oversized": True, "size": int(declared)}
-            except ValueError:
-                return {"error": "invalid content length"}
+        lengths = response.headers.get_all("Content-Length", [])
+        transfers = response.headers.get_all("Transfer-Encoding", [])
+        if transfers and (lengths or len(transfers) != 1 or transfers[0].strip().lower() != "chunked"):
+            return {"status": status, "error": "ambiguous or unsupported response framing"}
+        if lengths:
+            declared = lengths[0].strip()
+            if len(lengths) != 1 or not declared.isascii() or not declared.isdecimal() or len(declared) > 16:
+                return {"status": status, "error": "invalid content length"}
+            if int(declared) > FILE_READ_CAP:
+                return {"status": status, "oversized": True, "size": int(declared)}
         chunks = []
         total = 0
         while True:
-            if response.isclosed():
-                break
             if time.monotonic() >= end_at:
                 return {"error": "timeout", "status": status}
+            if response.isclosed():
+                break
             conn._deadline_socket.settimeout(max(0.001, end_at - time.monotonic()))
             block = response.read1(64 * 1024)
             if not block:
@@ -353,10 +365,19 @@ def fetch_url(url: str, deadline: float, *, allow_loopback_http: bool) -> dict[s
             if total > FILE_READ_CAP:
                 return {"status": status, "oversized": True, "size": total}
             chunks.append(block)
+        # read1() accepts early EOF for declared-length responses. A watchdog
+        # shutdown can also look like ordinary close-delimited EOF. Neither is
+        # a complete observation merely because its prefix matched the text.
+        if time.monotonic() >= end_at:
+            return {"error": "timeout", "status": status}
+        if response.length not in (None, 0):
+            return {"error": "incomplete response body", "status": status}
         body = b"".join(chunks)
         return {"status": status, "body": body, "size": len(body), "sha256": hashlib.sha256(body).hexdigest()}
     except socket.timeout:
         return {"error": "timeout"}
+    except http.client.HTTPException:
+        return {"error": "incomplete or invalid HTTP framing"}
     except OSError as exc:
         if time.monotonic() >= end_at:
             return {"error": "timeout"}
@@ -364,6 +385,47 @@ def fetch_url(url: str, deadline: float, *, allow_loopback_http: bool) -> dict[s
     finally:
         watchdog.cancel()
         conn.close()
+
+
+class _FramedHTTPResponse(http.client.HTTPResponse):
+    """Strict chunk framing; stdlib's normal client tolerates EOF in trailers.
+
+    This is a per-connection response subclass, not a global patch. Body reads
+    still use the standard bounded read1 path and the connection watchdog.
+    """
+
+    def _read_next_chunk_size(self):
+        line = self.fp.readline(8193)
+        size = line.split(b";", 1)[0].removesuffix(b"\r\n")
+        if (len(line) > 8192 or not line.endswith(b"\r\n") or not size
+                or len(size) > 16 or any(c not in b"0123456789abcdefABCDEF" for c in size)):
+            raise http.client.IncompleteRead(b"")
+        return int(size, 16)
+
+    def _get_chunk_left(self):
+        chunk_left = self.chunk_left
+        if not chunk_left:
+            if chunk_left is not None and self._safe_read(2) != b"\r\n":
+                raise http.client.IncompleteRead(b"")
+            chunk_left = self._read_next_chunk_size()
+            if chunk_left == 0:
+                self._read_and_discard_trailer()
+                self._close_conn()
+                chunk_left = None
+            self.chunk_left = chunk_left
+        return chunk_left
+
+    def _read_and_discard_trailer(self):
+        total = 0
+        while True:
+            line = self.fp.readline(8193)
+            total += len(line)
+            if not line.endswith(b"\r\n") or len(line) > 8192 or total > 65536:
+                raise http.client.IncompleteRead(b"")
+            if line == b"\r\n":
+                return
+            if b":" not in line:
+                raise http.client.IncompleteRead(b"")
 
 
 def _resolve_addresses(host: str, port: int, timeout: float):

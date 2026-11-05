@@ -11,4 +11,3 @@ if NAME not in sys.modules:
     sys.modules[NAME] = module
     spec.loader.exec_module(module)
 plugin = sys.modules[NAME]
-
