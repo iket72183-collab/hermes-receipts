@@ -1,0 +1,15 @@
+name: hermes-receipts
+version: "0.1.0"
+description: "Deterministic receipts for explicit file, test, and website checks. Shows what actually passed. Not a lie detector, sandbox, or attestation."
+author: "BDT Talent Group"
+license: MIT
+requires_hermes: ">=0.22.4"
+platforms: [linux, macos]
+provides_tools:
+  - receipts_begin
+  - receipts_check
+  - receipts_get
+  - receipts_export
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call

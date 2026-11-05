@@ -1,0 +1,23 @@
+# Catalog template. Agent 1 fills repo and sha after independent approval.
+# Do not invent a public repository URL or commit SHA.
+name: hermes-receipts
+repo: ""
+sha: ""
+description: Deterministic receipts for explicit file, test, and website checks.
+maintainer: BDT Talent Group
+tier: community
+category: tools
+requires_hermes: ">=0.22.4"
+version: "0.1.0"
+platforms: [linux, macos]
+capabilities:
+  provides_tools:
+    - receipts_begin
+    - receipts_check
+    - receipts_get
+    - receipts_export
+  provides_hooks:
+    - pre_tool_call
+    - post_tool_call
+  provides_middleware: []
+  requires_env: []
