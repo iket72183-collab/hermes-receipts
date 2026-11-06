@@ -15,6 +15,7 @@ from .schema import PLUGIN_NAME, host_context_complete, valid_id
 
 _LOCK = threading.Lock()
 _EPOCH: str | None = None
+_EPOCH_PID: int | None = None
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS attempts (
@@ -74,17 +75,19 @@ def utc_now() -> str:
 
 
 def current_epoch() -> str:
-    global _EPOCH
-    if _EPOCH is None:
+    global _EPOCH, _EPOCH_PID
+    pid = os.getpid()
+    if _EPOCH is None or _EPOCH_PID != pid:
         _EPOCH = secrets.token_hex(8)
+        _EPOCH_PID = pid
     return _EPOCH
 
 
 def reset_epoch_for_tests() -> str:
     """Test-only: simulate a process restart's new capture epoch."""
     global _EPOCH
-    _EPOCH = secrets.token_hex(8)
-    return _EPOCH
+    _EPOCH = None
+    return current_epoch()
 
 
 def connect(db_path: Path | None = None) -> sqlite3.Connection:
@@ -106,9 +109,9 @@ def connect(db_path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(_SCHEMA)
-    epoch = current_epoch()
-    conn.execute("UPDATE armed SET expired=1 WHERE epoch != ?", (epoch,))
-    conn.execute("UPDATE pre_events SET expired=1 WHERE epoch != ?", (epoch,))
+    # A different epoch may belong to another live process. Opening storage
+    # must not invalidate its capture. Hook queries require our own epoch,
+    # so restarted (or forked) processes still cannot resume old captures.
     conn.commit()
     return conn
 

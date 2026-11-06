@@ -23,6 +23,8 @@ hermes plugins enable hermes-receipts
 
 Start a new Hermes process after installation. No extra Python dependencies or credentials are needed by the plugin. The offline development harness additionally requires a Hermes source checkout and its normal dependencies.
 
+The unit suite is tested on Python 3.11 and 3.14. Valid deeply nested JSON can parse successfully on one Python version and exceed parser limits on another; parser limits produce an unverified check and still seal the attempt.
+
 ## Use with Hermes
 
 Ask Hermes to call `receipts_begin` **before** performing the task. Example arguments:
@@ -47,7 +49,9 @@ Ask Hermes to call `receipts_begin` **before** performing the task. Example argu
 3. Retrieve it with `receipts_get`, or `/receipts webpage-delivery [attempt-id]`.
 4. Call `receipts_export` with `attempt_id` and `format: "html"` or `"json"`. The response gives a generated filename under the active profile's `plugin-data/hermes-receipts/exports/` directory.
 
-One open attempt is allowed per host task/session. Checks and criteria digests are immutable: fix the actual task, then begin a **new** attempt. Test observations must match host identity, command/workdir, process capture, and the freshness window (default 300 seconds). Missing host identity cannot verify a test. Background yields, denied actions, timeouts, and model-supplied exit codes do not pass. After restart, history remains readable but unfinished capture expires; start a fresh attempt.
+One open attempt is allowed per host task/session in the capturing process. Checks and criteria digests are immutable: fix the actual task, then begin a **new** attempt. Each spec may contain only one test check per exact command/workdir pair; duplicates are rejected at begin even when their expectations differ. Test observations must match host identity, command/workdir, process capture, and the freshness window (default 300 seconds). Missing host identity cannot verify a test. Background yields, denied actions, timeouts, and model-supplied exit codes do not pass. Looking up receipts from another process does not invalidate a live capture. Another process, including a restarted or forked process, cannot continue that capture; start a fresh attempt. History remains readable.
+
+Paths containing NUL characters are rejected before capture begins. Older persisted attempts with malformed paths and file/website adapter errors seal as unverified while preserving the results of other checks, so a new attempt can begin.
 
 Optional CLI: `hermes receipts begin --spec spec.json`, `check --attempt-id ID`, `get --task-id LABEL`, and `export --attempt-id ID --format html`. CLI file/website checks work normally; standalone CLI calls cannot manufacture the host identity required for terminal evidence.
 

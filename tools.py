@@ -131,10 +131,21 @@ def receipts_check(
             return _error("bound attempt requires the same host task and session to check")
     evaluated: dict[str, dict[str, Any]] = {}
     for check in spec["checks"]:
-        if check["kind"] == "file":
-            evaluated[check["id"]] = check_file(check, spec["workspace_root"])
-        elif check["kind"] == "website":
-            evaluated[check["id"]] = check_website(check, allow_loopback_http=bool(spec["allow_loopback_http"]))
+        try:
+            if check["kind"] == "file":
+                evaluated[check["id"]] = check_file(check, spec["workspace_root"])
+            elif check["kind"] == "website":
+                evaluated[check["id"]] = check_website(check, allow_loopback_http=bool(spec["allow_loopback_http"]))
+        except Exception as exc:
+            # A checker failure is missing evidence, not a reason to strand an
+            # open attempt or discard other results. Never expose exception text
+            # or claim content-derived evidence when the adapter did not finish.
+            evaluated[check["id"]] = {
+                "state": "unverified",
+                "reason": f"check could not complete: {type(exc).__name__}",
+                "evidence": {},
+                "provenance": "checker-error",
+            }
     checked_at = utc_now()
     with transaction(_DB_OVERRIDE) as conn:
         row = get_attempt(conn, attempt_id)

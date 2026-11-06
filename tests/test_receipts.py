@@ -4,6 +4,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -170,13 +171,25 @@ class ReceiptTests(unittest.TestCase):
     def test_json_parser_limits_seal_mixed_checks_and_allow_new_attempt(self):
         raw = self.spec()
         raw['checks'].append({'id':'json', 'kind':'file', 'path':'nested.json', 'json_keys':['ok']})
-        payloads = ('{"ok":' + '[' * 2000 + '0' + ']' * 2000 + '}',
-                    '{"ok":' + '1' * 5000 + '}')
-        for payload in payloads:
+        nested = '{"ok":' + '[' * 2000 + '0' + ']' * 2000 + '}'
+        loads = json.loads
+
+        def depth_limited_loads(value, *args, **kwargs):
+            # Newer decoders can parse this depth. Inject only the file decode
+            # failure so the lifecycle regression does not depend on CPython's
+            # current recursion threshold; receipt/storage JSON stays real.
+            if value == nested:
+                raise RecursionError("synthetic decoder depth limit")
+            return loads(value, *args, **kwargs)
+
+        payloads = ((nested, patch.object(checks.json, 'loads', side_effect=depth_limited_loads)),
+                    ('{"ok":' + '1' * 5000 + '}', nullcontext()))
+        for payload, decoder_limit in payloads:
             with self.subTest(payload_size=len(payload)):
                 (self.root / 'nested.json').write_text(payload)
                 attempt = self.begin(raw)
-                receipt = self.seal(attempt)
+                with decoder_limit:
+                    receipt = self.seal(attempt)
                 self.assertEqual(receipt['state'], 'unverified')
                 self.assertEqual([c['state'] for c in receipt['checks']], ['passed', 'unverified'])
                 self.assertIn('parser limit', receipt['checks'][1]['reason'])
@@ -185,6 +198,29 @@ class ReceiptTests(unittest.TestCase):
                 self.assertEqual(history['attempts'], [receipt])
                 (self.root / 'nested.json').write_text('{"ok":true}')
                 self.assertEqual(self.seal(self.begin(raw))['state'], 'verified')
+
+    def test_real_deep_json_follows_runtime_decoder_capability(self):
+        payload = '{"ok":' + '[' * 2000 + '0' + ']' * 2000 + '}'
+        (self.root / 'nested.json').write_text(payload)
+        try:
+            json.loads(payload)
+        except (RecursionError, ValueError, OverflowError, MemoryError):
+            expected = 'unverified'
+        else:
+            expected = 'verified'
+        raw = self.spec()
+        raw['checks'].append({'id':'json', 'kind':'file', 'path':'nested.json', 'json_keys':['ok']})
+        attempt = self.begin(raw)
+        receipt = self.seal(attempt)
+        self.assertEqual(receipt['state'], expected)
+        self.assertEqual(receipt['checks'][0]['state'], 'passed')
+        if expected == 'unverified':
+            self.assertIn('parser limit', receipt['checks'][1]['reason'])
+        else:
+            self.assertEqual(receipt['checks'][1]['state'], 'passed')
+        self.assertEqual(self.seal(attempt), receipt)
+        (self.root / 'nested.json').write_text('{"ok":true}')
+        self.assertEqual(self.seal(self.begin(raw))['state'], 'verified')
 
     def test_json_parser_resource_errors_are_unverified(self):
         raw = {'path':'page.html', 'json_keys':['ok']}

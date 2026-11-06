@@ -116,6 +116,8 @@ def normalize_spec(raw: Any) -> dict[str, Any]:
         raise SpecError("workspace_root must be an absolute path")
     if len(workspace) > MAX_PATH:
         raise SpecError("workspace_root is too long")
+    if "\x00" in workspace:
+        raise SpecError("workspace_root must not contain NUL characters")
     freshness = raw.get("freshness_seconds", DEFAULT_FRESHNESS_SECONDS)
     freshness = _int(freshness, "freshness_seconds", MIN_FRESHNESS_SECONDS, MAX_FRESHNESS_SECONDS)
     allow_loopback = raw.get("allow_loopback_http", False)
@@ -128,8 +130,20 @@ def normalize_spec(raw: Any) -> dict[str, Any]:
         raise SpecError(f"checks must contain {MIN_CHECKS} to {MAX_CHECKS} items")
     checks: list[dict[str, Any]] = []
     seen: set[str] = set()
+    terminal_matches: dict[tuple[str, str], str] = {}
     for item in checks_raw:
-        checks.append(_normalize_check(item, seen))
+        check = _normalize_check(item, seen)
+        if check["kind"] == "test":
+            # Native hooks identify a criterion by exact command/workdir. Two
+            # criteria sharing that pair are ambiguous even if expectations differ.
+            match = (check["command"], check["workdir"])
+            if match in terminal_matches:
+                raise SpecError(
+                    f"{check['id']} duplicates test command/workdir from {terminal_matches[match]}; "
+                    "use one test check per exact command/workdir pair"
+                )
+            terminal_matches[match] = check["id"]
+        checks.append(check)
     spec = {
         "schema_version": SCHEMA_VERSION,
         "task_id": task_id,
@@ -163,6 +177,8 @@ def _file_check(item: dict[str, Any], check_id: str) -> dict[str, Any]:
     _reject_unknown(item, allowed, check_id)
     path = _bounded_str(item.get("path"), f"{check_id}.path", MAX_PATH)
     assert path is not None
+    if "\x00" in path:
+        raise SpecError(f"{check_id}.path must not contain NUL characters")
     if path.startswith("/") or "\\" in path or path.split("/")[0] in {"", ".", ".."}:
         raise SpecError(f"{check_id}.path must be workspace-relative")
     parts = path.split("/")
@@ -197,6 +213,8 @@ def _test_check(item: dict[str, Any], check_id: str) -> dict[str, Any]:
     command = _bounded_str(item.get("command"), f"{check_id}.command", MAX_COMMAND)
     workdir = _bounded_str(item.get("workdir"), f"{check_id}.workdir", MAX_PATH)
     assert command is not None and workdir is not None
+    if "\x00" in workdir:
+        raise SpecError(f"{check_id}.workdir must not contain NUL characters")
     if not workdir.startswith("/"):
         raise SpecError(f"{check_id}.workdir must be absolute")
     expected = item.get("expected_exit", 0)

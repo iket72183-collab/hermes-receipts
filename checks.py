@@ -35,6 +35,9 @@ def check_file(check: dict[str, Any], workspace_root: str) -> dict[str, Any]:
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
             return {"state": "failed", "reason": "symlink or non-directory path rejected", "evidence": {"relative_path": rel}, "provenance": "file-read"}
         return _unverified(f"read failed: {type(exc).__name__}", rel)
+    except ValueError as exc:
+        # Old persisted specs and platform path conversion errors must still seal.
+        return _unverified(f"invalid file path: {type(exc).__name__}", rel)
     digest = sha256_bytes(data)
     evidence = {"relative_path": rel, "size": len(data), "sha256": digest}
     if "json_keys" in check:
@@ -76,6 +79,8 @@ def workspace_refusal(workspace_root: str) -> str | None:
 
 def _read_regular(workspace_root: str, rel: str) -> bytes:
     """Descriptor-relative traversal: no symlink race, FIFO wait, or unbounded read."""
+    if "\x00" in workspace_root or "\x00" in rel:
+        raise _FileRefused("file paths must not contain NUL characters", "unverified")
     parts = rel.split("/")
     if not Path(workspace_root).is_absolute() or any(p in {"", ".", ".."} for p in parts) or "\\" in rel:
         raise _FileRefused("path traversal rejected")
