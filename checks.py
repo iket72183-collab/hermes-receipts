@@ -88,15 +88,19 @@ def _read_regular(workspace_root: str, rel: str) -> bytes:
         root = Path(workspace_root).resolve()
     except (OSError, RuntimeError, ValueError) as exc:
         raise _FileRefused(f"workspace resolution failed: {type(exc).__name__}", "unverified") from exc
+    target = root.joinpath(*parts)
     refusal = workspace_refusal(str(root))
     if refusal:
         raise _FileRefused(refusal, "unverified")
     try:
         from agent.file_safety import get_read_block_error
 
-        refusal = get_read_block_error(str(root.joinpath(*parts)))
+        refusal = get_read_block_error(str(target))
     except Exception as exc:
         raise _FileRefused(f"Hermes read safety unavailable: {type(exc).__name__}", "unverified") from exc
+    if refusal:
+        raise _FileRefused(refusal, "unverified")
+    refusal = workspace_refusal(str(target))
     if refusal:
         raise _FileRefused(refusal, "unverified")
     descriptors = []

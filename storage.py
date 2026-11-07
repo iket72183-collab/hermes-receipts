@@ -181,7 +181,7 @@ def get_attempt(conn: sqlite3.Connection, attempt_id: str) -> sqlite3.Row | None
 
 def list_attempts(conn: sqlite3.Connection, task_id: str) -> list[sqlite3.Row]:
     return list(conn.execute(
-        "SELECT * FROM attempts WHERE task_id = ? ORDER BY started_at ASC, attempt_id ASC",
+        "SELECT * FROM attempts WHERE task_id = ? ORDER BY started_at ASC, rowid ASC",
         (task_id,),
     ))
 
@@ -196,6 +196,7 @@ def seal_attempt(conn: sqlite3.Connection, attempt_id: str, receipt: dict[str, A
         (sealed_at, json.dumps(receipt), attempt_id),
     )
     conn.execute("UPDATE armed SET expired = 1 WHERE attempt_id = ?", (attempt_id,))
+    conn.execute("UPDATE pre_events SET expired = 1 WHERE attempt_id = ?", (attempt_id,))
 
 
 def mark_identity_conflict(conn: sqlite3.Connection, attempt_id: str) -> None:
@@ -269,18 +270,36 @@ def insert_observation(conn: sqlite3.Connection, tool_call_id: str, attempt_id: 
     )
 
 
-def observation_for(conn: sqlite3.Connection, attempt_id: str, check_id: str) -> dict[str, Any] | None:
-    row = conn.execute(
+def observations_for(conn: sqlite3.Connection, attempt_id: str, check_id: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
         """
         SELECT payload_json FROM observations
         WHERE attempt_id = ? AND check_id = ?
-        ORDER BY observed_at ASC LIMIT 1
+        ORDER BY rowid ASC
         """,
         (attempt_id, check_id),
-    ).fetchone()
-    if row is None:
-        return None
-    return json.loads(row["payload_json"])
+    ).fetchall()
+    return [json.loads(row["payload_json"]) for row in rows]
+
+
+def incomplete_pre_events_for(conn: sqlite3.Connection, attempt_id: str, check_id: str) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        """
+        SELECT tool_call_id, started_at FROM pre_events
+        WHERE attempt_id = ? AND check_id = ?
+          AND tool_call_id NOT IN (
+              SELECT tool_call_id FROM observations
+              WHERE attempt_id = ? AND check_id = ?
+          )
+        ORDER BY rowid ASC
+        """,
+        (attempt_id, check_id, attempt_id, check_id),
+    ))
+
+
+def observation_for(conn: sqlite3.Connection, attempt_id: str, check_id: str) -> dict[str, Any] | None:
+    items = observations_for(conn, attempt_id, check_id)
+    return items[0] if items else None
 
 
 def transaction(db_path: Path | None = None):

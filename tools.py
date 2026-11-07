@@ -23,10 +23,12 @@ from .schema import (
 )
 from .storage import (
     get_attempt,
+    incomplete_pre_events_for,
     insert_attempt,
     list_attempts,
     new_attempt_id,
     observation_for,
+    observations_for,
     open_attempt_for_host,
     seal_attempt,
     transaction,
@@ -146,13 +148,13 @@ def receipts_check(
                 "evidence": {},
                 "provenance": "checker-error",
             }
-    checked_at = utc_now()
     with transaction(_DB_OVERRIDE) as conn:
         row = get_attempt(conn, attempt_id)
         if row is None:
             return _error("attempt not found")
         if row["receipt_json"]:
             return row["receipt_json"]
+        checked_at = utc_now()
         checks_out = []
         for check in spec["checks"]:
             if check["kind"] == "test":
@@ -294,11 +296,35 @@ def normalize(raw: dict[str, Any]):
 
 def _evaluate_test(conn, row, check, spec, checked_at: str, conflict: bool) -> dict[str, Any]:
     identity_ok = host_context_complete(row["host_task_id"], row["host_session_id"]) and not conflict
-    observation = observation_for(conn, row["attempt_id"], check["id"])
-    fresh = False
-    if observation is not None and identity_ok:
-        fresh = _fresh(observation, row["started_at"], checked_at, spec["freshness_seconds"], row["criteria_digest"])
-    return judge_test_observation(check, observation, fresh=fresh, identity_ok=identity_ok)
+    observations = observations_for(conn, row["attempt_id"], check["id"])
+    pending = incomplete_pre_events_for(conn, row["attempt_id"], check["id"])
+    judged = []
+    for observation in observations:
+        fresh = False
+        if identity_ok:
+            fresh = _fresh(observation, row["started_at"], checked_at, spec["freshness_seconds"], row["criteria_digest"])
+        judged.append(judge_test_observation(check, observation, fresh=fresh, identity_ok=identity_ok))
+    failed = [item for item in judged if item["state"] == "failed"]
+    if failed:
+        return failed[-1]
+    if pending:
+        if not identity_ok:
+            return judge_test_observation(check, None, fresh=False, identity_ok=False)
+        return {
+            "state": "unverified",
+            "reason": "terminal execution in progress or incomplete",
+            "evidence": {
+                "provenance_note": "observed native terminal execution, not a human approval",
+                "tool_call_id": str(pending[-1]["tool_call_id"]),
+            },
+            "provenance": "observed-native-terminal",
+        }
+    if not judged:
+        return judge_test_observation(check, None, fresh=False, identity_ok=identity_ok)
+    unverified = [item for item in judged if item["state"] == "unverified"]
+    if unverified:
+        return unverified[-1]
+    return judged[-1]
 
 
 def _fresh(observation: dict[str, Any], started_at: str, checked_at: str, window: int, digest: str) -> bool:

@@ -18,6 +18,15 @@ def main():
         assert receipt.get('state')==want, {'scenario':label,'terminal':terminal,'receipt':receipt}
         results.append({'scenario':label,'state':receipt['state'],'attempt_id':begin['attempt_id']})
         runtime.exports(begin['attempt_id'])
+    toggle="python3 -c \"from pathlib import Path; p=Path('toggle.txt'); ok=not p.exists(); p.write_text('1'); assert ok; print('Ready')\""
+    spec={'schema_version':1,'task_id':'smoke-repeat-pass-then-fail','workspace_root':str(runtime.workspace),'checks':[{'id':'test','kind':'test','command':toggle,'workdir':str(runtime.workspace),'timeout':5,'contains':'Ready'}]}
+    begin=runtime.call('receipts_begin',{'spec':spec});assert begin.get('ok'),begin
+    first=runtime.call('terminal',{'command':toggle,'workdir':str(runtime.workspace),'timeout':5})
+    second=runtime.call('terminal',{'command':toggle,'workdir':str(runtime.workspace),'timeout':5})
+    receipt=runtime.call('receipts_check',{'attempt_id':begin['attempt_id']})
+    assert receipt.get('state')=='failed', {'scenario':'repeat-pass-then-fail','first':first,'second':second,'receipt':receipt}
+    results.append({'scenario':'repeat-pass-then-fail','state':receipt['state'],'attempt_id':begin['attempt_id']})
+    runtime.exports(begin['attempt_id'])
     summary={'native_dispatch':True,'callbacks_seeded':False,'model_calls':0,'home':str(runtime.home),'scenarios':results}
     (args.evidence_dir/'smoke-summary.json').write_text(json.dumps(summary,indent=2)+'\n')
     print(json.dumps(summary,indent=2))

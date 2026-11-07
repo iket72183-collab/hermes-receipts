@@ -41,6 +41,8 @@ def main():
         (runtime.workspace, '.env', {'json_keys': ['ok']}, 'unverified'),
         # An ancestor workspace cannot bypass the denylist on a private target.
         (runtime.output, str(runtime.home.relative_to(runtime.output) / '.env'), {'contains': 'Ready'}, 'unverified'),
+        # Non-denylisted files under HERMES_HOME are also refused via ancestor workspaces.
+        (runtime.output, str(runtime.home.relative_to(runtime.output) / 'config.yaml'), {'contains': 'plugins'}, 'unverified'),
     ]
     for root, path, expectation, want in scenarios:
         begin = runtime.call('receipts_begin', {'spec': spec(root, path, expectation)})
@@ -49,7 +51,8 @@ def main():
         assert receipt['state'] == want, receipt
         check = receipt['checks'][0]
         if want == 'unverified':
-            assert check['reason'] == get_read_block_error(str(root / path)), check
+            expected_reason = get_read_block_error(str(root / path)) or 'workspace_root must not be at or under the active Hermes home'
+            assert check['reason'] == expected_reason, check
             assert check['evidence'] == {'relative_path': path}, check
         results.append({'scenario': path, 'expectation': expectation, 'state': receipt['state']})
     summary = {'real_hermes_safety': True, 'native_dispatch': True, 'synthetic_files_only': True,
